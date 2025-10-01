@@ -10,6 +10,7 @@
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Threading.h"
 #include <memory>
@@ -297,11 +298,11 @@ Type LLVMTypeConverter::convertFloatType(FloatType type) const {
   if (LLVM::isCompatibleType(type))
     return type;
 
-  // F4, F6, F8 types are converted to integer types with the same bit width.
+  // F4, F6, F8, BF16 types are converted to integer types with the same bit width.
   if (isa<Float8E5M2Type, Float8E4M3Type, Float8E4M3FNType, Float8E5M2FNUZType,
           Float8E4M3FNUZType, Float8E4M3B11FNUZType, Float8E3M4Type,
           Float4E2M1FNType, Float6E2M3FNType, Float6E3M2FNType,
-          Float8E8M0FNUType>(type))
+          Float8E8M0FNUType, BFloat16Type>(type))
     return IntegerType::get(&getContext(), type.getWidth());
 
   // Other floating-point types: A custom type conversion rule must be
