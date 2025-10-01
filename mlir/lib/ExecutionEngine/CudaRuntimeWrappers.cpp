@@ -244,13 +244,13 @@ mgpuMemAlloc(uint64_t sizeBytes, CUstream stream, bool isHostShared) {
         cuMemAllocManaged(&ptr, sizeBytes, CU_MEM_ATTACH_GLOBAL));
     return reinterpret_cast<void *>(ptr);
   }
-  CUDA_REPORT_IF_ERROR(cuMemAlloc(&ptr, sizeBytes));
+  CUDA_REPORT_IF_ERROR(cuMemAllocAsync(&ptr, sizeBytes, stream));
   return reinterpret_cast<void *>(ptr);
 }
 
 extern "C" MLIR_CUDA_WRAPPERS_EXPORT void mgpuMemFree(void *ptr,
-                                                      CUstream /*stream*/) {
-  CUDA_REPORT_IF_ERROR(cuMemFree(reinterpret_cast<CUdeviceptr>(ptr)));
+                                                      CUstream stream) {
+  CUDA_REPORT_IF_ERROR(cuMemFreeAsync(reinterpret_cast<CUdeviceptr>(ptr), stream));
 }
 
 extern "C" MLIR_CUDA_WRAPPERS_EXPORT void
