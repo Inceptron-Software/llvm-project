@@ -18,6 +18,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Utils/GPUUtils.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
@@ -43,7 +44,23 @@ class GpuAsyncRegionPass
 static bool isTerminator(Operation *op) {
   return op->mightHaveTrait<OpTrait::IsTerminator>();
 }
-static bool hasSideEffects(Operation *op) { return !isMemoryEffectFree(op); }
+static bool hasSideEffects(Operation *op) {
+  auto effects = getEffectsRecursively(op);
+  if (!effects)
+    return false;
+
+  return std::any_of(effects->begin(), effects->end(), [](const MemoryEffects::EffectInstance &effect) {
+    Value target = effect.getValue();
+    if (!target)
+      return false;
+
+    auto memrefType = dyn_cast<BaseMemRefType>(target.getType());
+    if (!memrefType)
+      return false;
+
+    return memrefType.getMemorySpaceAsInt() == 1;
+  });
+}
 
 // Region walk callback which makes GPU ops implementing the AsyncOpInterface
 // execute asynchronously.
