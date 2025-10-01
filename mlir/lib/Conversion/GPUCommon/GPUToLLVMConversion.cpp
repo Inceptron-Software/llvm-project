@@ -1062,8 +1062,10 @@ LogicalResult ConvertMemcpyOpToGpuRuntimeCallPattern::matchAndRewrite(
   auto memRefType = cast<MemRefType>(memcpyOp.getSrc().getType());
 
   if (failed(areAllLLVMTypes(memcpyOp, adaptor.getOperands(), rewriter)) ||
-      !isConvertibleAndHasIdentityMaps(memRefType) ||
       failed(isAsyncWithOneDependency(rewriter, memcpyOp)))
+    return failure();
+
+  if (!(memRefType.getLayout().isIdentity() || memRefType.isStrided()))
     return failure();
 
   auto loc = memcpyOp.getLoc();
