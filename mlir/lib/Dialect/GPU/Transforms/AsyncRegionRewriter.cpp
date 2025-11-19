@@ -18,6 +18,7 @@
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Utils/GPUUtils.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -129,6 +130,22 @@ private:
         op->getLoc(), op->getName(), resultTypes, op->getOperands(),
         op->getDiscardableAttrDictionary(), op->getPropertiesStorage(),
         op->getSuccessors(), op->getNumRegions());
+
+    // Adjust the AttrSizedResultSegments metadata to account for the appended
+    // async token result.
+    if (op->hasTrait<OpTrait::AttrSizedResultSegments>()) {
+      auto attrName =
+          OpTrait::AttrSizedResultSegments<void>::getResultSegmentSizeAttr();
+      auto attr = newOp->getInherentAttr(attrName);
+      if (auto sizeAttr = dyn_cast<DenseI32ArrayAttr>(*attr)) {
+        if (!sizeAttr.empty()) {
+          SmallVector<int32_t> sizes(sizeAttr.asArrayRef());
+          sizes.back() += 1;
+          auto newSizesAttr = DenseI32ArrayAttr::get(op->getContext(), sizes);
+          newOp->setInherentAttr(builder.getStringAttr(attrName), newSizesAttr);
+        }
+      }
+    }
 
     // Clone regions into new op.
     IRMapping mapping;
