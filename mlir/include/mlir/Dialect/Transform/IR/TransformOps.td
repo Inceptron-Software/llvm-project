@@ -680,7 +680,7 @@ def ForeachOp : TransformDialectOp<"foreach",
 
 def GetConsumersOfResult : TransformDialectOp<"get_consumers_of_result",
     [DeclareOpInterfaceMethods<TransformOpInterface>,
-     NavigationTransformOpTrait, MemoryEffectsOpInterface]> {
+     NavigationTransformOpTrait, MemoryEffectsOpInterface, MatchOpInterface]> {
   let summary = "Get handle to the consumers of this operation's result number";
   let description = [{
     The handle defined by this Transform op corresponds to all operations that
