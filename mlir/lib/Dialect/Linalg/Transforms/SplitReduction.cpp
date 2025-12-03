@@ -123,9 +123,11 @@ FailureOr<SplitReductionResult> mlir::linalg::splitReduction(
   // Calculate the new output map and shape, we insert the new dimension based
   // on the index returned by `controlSplitReductionFn`.
   SmallVector<int64_t> newOutputShape;
+  SmallVector<Value> newOutputDynamicSizes;
   AffineMap oldOutputMap = op.getMatchingIndexingMap(op.getDpsInitOperand(0));
   ArrayRef<int64_t> oldShape = op.getShape(op.getDpsInitOperand(0));
   SmallVector<AffineExpr> outputExpr;
+  Value initTensor = op.getDpsInitOperand(0)->get();
   for (unsigned idx : llvm::seq<unsigned>(0, oldShape.size() + 1)) {
     if (insertSplitIndex == idx) {
       newOutputShape.push_back(ratio);
@@ -133,6 +135,10 @@ FailureOr<SplitReductionResult> mlir::linalg::splitReduction(
     }
     if (idx < oldShape.size()) {
       newOutputShape.push_back(oldShape[idx]);
+      if (oldShape[idx] == ShapedType::kDynamic) {
+        newOutputDynamicSizes.push_back(
+            b.create<tensor::DimOp>(loc, initTensor, idx));
+      }
       unsigned dim = oldOutputMap.getDimPosition(idx);
       outputExpr.push_back(
           b.getAffineDimExpr(dim < insertSplitDimension ? dim : dim + 1));
@@ -144,10 +150,11 @@ FailureOr<SplitReductionResult> mlir::linalg::splitReduction(
         loc,
         RankedTensorType::get(newOutputShape,
                               op.getRegionOutputArgs()[0].getType()),
-        ValueRange{});
+        newOutputDynamicSizes);
   } else {
     emptyOrAllocTensor = b.create<tensor::EmptyOp>(
-        loc, newOutputShape, op.getRegionOutputArgs()[0].getType());
+        loc, newOutputShape, op.getRegionOutputArgs()[0].getType(),
+        newOutputDynamicSizes);
   }
   Value constantOp = b.create<arith::ConstantOp>(loc, *identity);
   Value identityTensor =
