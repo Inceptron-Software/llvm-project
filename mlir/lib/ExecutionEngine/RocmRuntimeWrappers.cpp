@@ -104,15 +104,33 @@ extern "C" void mgpuEventRecord(hipEvent_t event, hipStream_t stream) {
   HIP_REPORT_IF_ERROR(hipEventRecord(event, stream));
 }
 
-extern "C" void *mgpuMemAlloc(uint64_t sizeBytes, hipStream_t /*stream*/,
+extern "C" void *mgpuMemAlloc(uint64_t sizeBytes, hipStream_t stream,
                               bool /*isHostShared*/) {
-  void *ptr;
-  HIP_REPORT_IF_ERROR(hipMalloc(&ptr, sizeBytes));
+  void *ptr = nullptr;
+  int memoryPoolsSupported = 0;
+  HIP_REPORT_IF_ERROR(hipDeviceGetAttribute(
+      &memoryPoolsSupported, hipDeviceAttributeMemoryPoolsSupported,
+      defaultDevice));
+
+  if (memoryPoolsSupported) {
+    HIP_REPORT_IF_ERROR(hipMallocAsync(&ptr, sizeBytes, stream));
+  } else {
+    HIP_REPORT_IF_ERROR(hipMalloc(&ptr, sizeBytes));
+  }
   return ptr;
 }
 
-extern "C" void mgpuMemFree(void *ptr, hipStream_t /*stream*/) {
-  HIP_REPORT_IF_ERROR(hipFree(ptr));
+extern "C" void mgpuMemFree(void *ptr, hipStream_t stream) {
+  int memoryPoolsSupported = 0;
+  HIP_REPORT_IF_ERROR(hipDeviceGetAttribute(
+      &memoryPoolsSupported, hipDeviceAttributeMemoryPoolsSupported,
+      defaultDevice));
+
+  if (memoryPoolsSupported) {
+    HIP_REPORT_IF_ERROR(hipFreeAsync(ptr, stream));
+  } else {
+    HIP_REPORT_IF_ERROR(hipFree(ptr));
+  }
 }
 
 extern "C" void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
