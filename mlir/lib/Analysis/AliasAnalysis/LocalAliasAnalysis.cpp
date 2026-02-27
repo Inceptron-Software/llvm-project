@@ -17,6 +17,7 @@
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -255,6 +256,22 @@ getAllocEffectFor(Value value,
   return success();
 }
 
+/// Return true if the value is an entry block function argument belonging to a
+/// function that does not call any other function.
+static bool originatesFromNoCalleeFunctionArgument(Value value) {
+  BlockArgument arg = dyn_cast<BlockArgument>(value);
+  if (!arg || !arg.getOwner()->isEntryBlock())
+    return false;
+
+  auto func = dyn_cast<FunctionOpInterface>(arg.getOwner()->getParentOp());
+  if (!func)
+    return false;
+
+  WalkResult hasCall = func->walk(
+      [](CallOpInterface) { return WalkResult::interrupt(); });
+  return !hasCall.wasInterrupted();
+}
+
 /// Given the two values, return their aliasing behavior.
 AliasResult LocalAliasAnalysis::aliasImpl(Value lhs, Value rhs) {
   if (lhs == rhs)
@@ -288,8 +305,10 @@ AliasResult LocalAliasAnalysis::aliasImpl(Value lhs, Value rhs) {
 
   // Otherwise, neither of the values are constant so check to see if either has
   // an allocation effect.
-  bool lhsHasAlloc = succeeded(getAllocEffectFor(lhs, lhsAlloc, lhsAllocScope));
-  bool rhsHasAlloc = succeeded(getAllocEffectFor(rhs, rhsAlloc, rhsAllocScope));
+  bool lhsHasAlloc = succeeded(getAllocEffectFor(lhs, lhsAlloc, lhsAllocScope)) ||
+                     originatesFromNoCalleeFunctionArgument(lhs);
+  bool rhsHasAlloc = succeeded(getAllocEffectFor(rhs, rhsAlloc, rhsAllocScope)) ||
+                     originatesFromNoCalleeFunctionArgument(rhs);
   if (lhsHasAlloc == rhsHasAlloc) {
     // If both values have an allocation effect we know they don't alias, and if
     // neither have an effect we can't make an assumptions.
