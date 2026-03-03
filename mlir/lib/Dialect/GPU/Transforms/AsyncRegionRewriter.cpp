@@ -17,6 +17,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/GPU/Utils/GPUUtils.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -68,15 +69,117 @@ static bool hasSideEffects(Operation *op) {
 struct GpuAsyncRegionPass::ThreadTokenCallback {
   ThreadTokenCallback(MLIRContext &context) : builder(&context) {}
 
-  WalkResult operator()(Block *block) {
-    for (Operation &op : make_early_inc_range(*block)) {
-      if (failed(visit(&op)))
-        return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
+  LogicalResult rewrite(Operation *op) {
+    for (Region &region : op->getRegions())
+      if (failed(rewriteRegion(region)))
+        return failure();
+    return success();
   }
 
 private:
+  LogicalResult rewriteRegion(Region &region) {
+    for (Block &block : region) {
+      Value token;
+      if (failed(rewriteBlock(block, token, /*synchronizeYield=*/true)))
+        return failure();
+    }
+    return success();
+  }
+
+  LogicalResult rewriteBlock(Block &block, Value &currentToken,
+                             bool synchronizeYield) {
+    for (Operation &op : make_early_inc_range(block))
+      if (failed(visit(&op, currentToken, synchronizeYield)))
+        return failure();
+    return success();
+  }
+
+  Value getTrailingTokenResult(scf::IfOp ifOp) const {
+    if (ifOp.getNumResults() == 0)
+      return {};
+    Value result = ifOp.getResult(ifOp.getNumResults() - 1);
+    if (!isa<gpu::AsyncTokenType>(result.getType()))
+      return {};
+    return result;
+  }
+
+  void synchronizeBranchToken(Block *block, Value &token) {
+    if (!token)
+      return;
+    auto *terminator = block->getTerminator();
+    builder.setInsertionPoint(terminator);
+    createWaitOp(terminator->getLoc(), Type(), {token});
+    token = {};
+  }
+
+  LogicalResult rewriteIfOp(scf::IfOp ifOp, Value &currentToken) {
+    Value incomingToken = currentToken;
+
+    Value thenToken = incomingToken;
+    if (failed(rewriteBlock(*ifOp.thenBlock(), thenToken,
+                            /*synchronizeYield=*/false)))
+      return failure();
+
+    Value elseToken = incomingToken;
+    if (ifOp.elseBlock())
+      if (failed(rewriteBlock(*ifOp.elseBlock(), elseToken,
+                              /*synchronizeYield=*/false)))
+        return failure();
+
+    // If this if-op already returns a token, trust that as the outgoing token.
+    if (Value existingToken = getTrailingTokenResult(ifOp)) {
+      currentToken = existingToken;
+      return success();
+    }
+
+    // No token evolution across either branch.
+    if (thenToken == incomingToken && elseToken == incomingToken) {
+      currentToken = incomingToken;
+      return success();
+    }
+
+    // scf.if without else cannot thread a token result. Synchronize changed
+    // branch work and keep the incoming token for the fallthrough path.
+    if (!ifOp.elseBlock()) {
+      if (thenToken && thenToken != incomingToken)
+        synchronizeBranchToken(ifOp.thenBlock(), thenToken);
+      currentToken = incomingToken;
+      return success();
+    }
+
+    // If both branches end with tokens, thread them through scf.if.
+    if (thenToken && elseToken) {
+      auto tokenType = builder.getType<gpu::AsyncTokenType>();
+      SmallVector<Type, 2> resultTypes(ifOp.getResultTypes());
+      resultTypes.push_back(tokenType);
+
+      builder.setInsertionPoint(ifOp);
+      auto newIfOp = builder.create<scf::IfOp>(ifOp.getLoc(), resultTypes,
+                                               ifOp.getCondition(),
+                                               /*withElseRegion=*/true);
+      newIfOp->setAttrs(ifOp->getAttrs());
+      newIfOp.getThenRegion().takeBody(ifOp.getThenRegion());
+      newIfOp.getElseRegion().takeBody(ifOp.getElseRegion());
+
+      auto thenYield = cast<scf::YieldOp>(newIfOp.thenBlock()->getTerminator());
+      thenYield->insertOperands(thenYield.getNumOperands(), thenToken);
+      auto elseYield = cast<scf::YieldOp>(newIfOp.elseBlock()->getTerminator());
+      elseYield->insertOperands(elseYield.getNumOperands(), elseToken);
+
+      ifOp->replaceAllUsesWith(newIfOp.getResults().drop_back());
+      currentToken = newIfOp.getResult(newIfOp.getNumResults() - 1);
+      ifOp->erase();
+      return success();
+    }
+
+    // Mixed token/no-token branches cannot be threaded with a single SSA token.
+    // Synchronize the tokenized branches before yielding.
+    synchronizeBranchToken(ifOp.thenBlock(), thenToken);
+    synchronizeBranchToken(ifOp.elseBlock(), elseToken);
+    currentToken = {};
+    return success();
+  }
+
   // If `op` implements the AsyncOpInterface, insert a `gpu.wait async` to
   // create a current token (unless it already exists), and 'thread' that token
   // through the `op` so that it executes asynchronously.
@@ -85,7 +188,8 @@ private:
   // host-synchronize execution. A `!gpu.async.token` will therefore only be
   // used inside of its block and GPU execution will always synchronize with
   // the host at block boundaries.
-  LogicalResult visit(Operation *op) {
+  LogicalResult visit(Operation *op, Value &currentToken,
+                      bool synchronizeYield) {
     if (isa<gpu::LaunchOp>(op))
       return op->emitOpError("replace with gpu.launch_func first");
     if (auto waitOp = llvm::dyn_cast<gpu::WaitOp>(op)) {
@@ -95,18 +199,28 @@ private:
       return success();
     }
     builder.setInsertionPoint(op);
+    if (auto ifOp = dyn_cast<scf::IfOp>(op))
+      return rewriteIfOp(ifOp, currentToken);
+    // TODO: Add support for scf::ForOp here.
     if (auto asyncOp = dyn_cast<gpu::AsyncOpInterface>(op))
-      return rewriteAsyncOp(asyncOp); // Replace GPU op with async version.
+      return rewriteAsyncOp(asyncOp,
+                            currentToken); // Replace GPU op with async version.
+    for (Region &region : op->getRegions())
+      if (failed(rewriteRegion(region)))
+        return failure();
     if (!currentToken)
       return success();
     // Insert host synchronization before terminator or op with side effects.
-    if (isTerminator(op) || hasSideEffects(op))
+    bool shouldSynchronize = (isTerminator(op) || hasSideEffects(op)) &&
+                             (synchronizeYield || !isa<scf::YieldOp>(op));
+    if (shouldSynchronize)
       currentToken = createWaitOp(op->getLoc(), Type(), {currentToken});
     return success();
   }
 
   // Replaces asyncOp with a clone that returns a token.
-  LogicalResult rewriteAsyncOp(gpu::AsyncOpInterface asyncOp) {
+  LogicalResult rewriteAsyncOp(gpu::AsyncOpInterface asyncOp,
+                               Value &currentToken) {
     auto *op = asyncOp.getOperation();
     auto tokenType = builder.getType<gpu::AsyncTokenType>();
 
@@ -168,12 +282,6 @@ private:
   }
 
   OpBuilder builder;
-
-  // The token that represents the current asynchronous dependency. It's valid
-  // range starts with a `gpu.wait async` op, and ends with a `gpu.wait` op.
-  // In between, each gpu::AsyncOpInterface depends on the current token and
-  // produces the new one.
-  Value currentToken = {};
 };
 
 /// Erases `executeOp` and returns a clone with additional `results`.
@@ -241,6 +349,8 @@ struct GpuAsyncRegionPass::DeferWaitCallback {
     for (size_t i = 0; i < worklist.size(); ++i) {
       auto waitOp = worklist[i];
       auto executeOp = waitOp->getParentOfType<async::ExecuteOp>();
+      if (!executeOp)
+        continue;
 
       // Erase `gpu.wait` and return async dependencies from execute op instead.
       SmallVector<Value, 4> dependencies = waitOp.getAsyncDependencies();
@@ -371,7 +481,7 @@ struct GpuAsyncRegionPass::SingleTokenUseCallback {
 // inserts the necessary synchronization (as gpu.wait ops). Assumes sequential
 // execution semantics and that no GPU ops are asynchronous yet.
 void GpuAsyncRegionPass::runOnOperation() {
-  if (getOperation()->walk(ThreadTokenCallback(getContext())).wasInterrupted())
+  if (failed(ThreadTokenCallback(getContext()).rewrite(getOperation())))
     return signalPassFailure();
 
   // Collect gpu.wait ops that we can move out of async.execute regions.
