@@ -95,23 +95,18 @@ private:
     return success();
   }
 
-  Value getTrailingTokenResult(scf::IfOp ifOp) const {
-    if (ifOp.getNumResults() == 0)
+  template <typename OpTy>
+  Value getTrailingTokenResult(OpTy op) const {
+    if (op.getNumResults() == 0) {
       return {};
-    Value result = ifOp.getResult(ifOp.getNumResults() - 1);
-    if (!isa<gpu::AsyncTokenType>(result.getType()))
+    }
+    Value result = op.getResult(op.getNumResults() - 1);
+    if (!isa<gpu::AsyncTokenType>(result.getType())) {
       return {};
+    }
     return result;
   }
 
-  Value getTrailingTokenResult(scf::ForOp forOp) const {
-    if (forOp.getNumResults() == 0)
-      return {};
-    Value result = forOp.getResult(forOp.getNumResults() - 1);
-    if (!isa<gpu::AsyncTokenType>(result.getType()))
-      return {};
-    return result;
-  }
 
   void synchronizeBranchToken(Block *block, Value &token) {
     if (!token)
