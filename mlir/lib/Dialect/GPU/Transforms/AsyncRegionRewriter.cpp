@@ -22,6 +22,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -94,14 +95,18 @@ private:
     return success();
   }
 
-  Value getTrailingTokenResult(scf::IfOp ifOp) const {
-    if (ifOp.getNumResults() == 0)
+  template <typename OpTy>
+  Value getTrailingTokenResult(OpTy op) const {
+    if (op.getNumResults() == 0) {
       return {};
-    Value result = ifOp.getResult(ifOp.getNumResults() - 1);
-    if (!isa<gpu::AsyncTokenType>(result.getType()))
+    }
+    Value result = op.getResult(op.getNumResults() - 1);
+    if (!isa<gpu::AsyncTokenType>(result.getType())) {
       return {};
+    }
     return result;
   }
+
 
   void synchronizeBranchToken(Block *block, Value &token) {
     if (!token)
@@ -180,6 +185,42 @@ private:
     return success();
   }
 
+  LogicalResult rewriteForOp(scf::ForOp forOp, Value &currentToken) {
+    // If this for-op already returns a token, trust that as the outgoing token.
+    if (Value existingToken = getTrailingTokenResult(forOp)) {
+      currentToken = existingToken;
+      return success();
+    }
+    // If none exists, creat a fresh async token.
+    auto tokenType = builder.getType<gpu::AsyncTokenType>();
+    if (!currentToken)
+      currentToken = createWaitOp(forOp.getLoc(), tokenType, {});
+
+    IRRewriter rewriter(builder.getContext());
+    rewriter.setInsertionPoint(forOp);
+    auto replacedLoop = forOp.replaceWithAdditionalYields(
+        rewriter, {currentToken}, /*replaceInitOperandUsesInLoop=*/true,
+        [](OpBuilder &, Location, ValueRange newIterArgs) {
+          return SmallVector<Value>{newIterArgs.front()};
+        });
+    if (failed(replacedLoop))
+      return failure();
+
+    auto newForOp = cast<scf::ForOp>(replacedLoop->getOperation());
+    Value iterToken = newForOp.getRegionIterArgs().back();
+    Value loopToken = iterToken;
+    if (failed(
+            rewriteBlock(*newForOp.getBody(), loopToken, /*synchronizeYield=*/false)))
+      return failure();
+    if (!loopToken)
+      loopToken = iterToken;
+
+    auto yieldOp = cast<scf::YieldOp>(newForOp.getBody()->getTerminator());
+    yieldOp.setOperand(yieldOp.getNumOperands() - 1, loopToken);
+    currentToken = newForOp.getResult(newForOp.getNumResults() - 1);
+    return success();
+  }
+
   // If `op` implements the AsyncOpInterface, insert a `gpu.wait async` to
   // create a current token (unless it already exists), and 'thread' that token
   // through the `op` so that it executes asynchronously.
@@ -201,7 +242,9 @@ private:
     builder.setInsertionPoint(op);
     if (auto ifOp = dyn_cast<scf::IfOp>(op))
       return rewriteIfOp(ifOp, currentToken);
-    // TODO: Add support for scf::ForOp here.
+    if (auto forOp = dyn_cast<scf::ForOp>(op))
+      return rewriteForOp(forOp, currentToken);
+
     if (auto asyncOp = dyn_cast<gpu::AsyncOpInterface>(op))
       return rewriteAsyncOp(asyncOp,
                             currentToken); // Replace GPU op with async version.
