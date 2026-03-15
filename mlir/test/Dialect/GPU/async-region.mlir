@@ -189,4 +189,19 @@ module attributes {gpu.container_module} {
     gpu.wait
     return
   }
+
+  // CHECK-LABEL:func @for_op_threads_token(
+  // CHECK: %[[INIT:.*]] = gpu.wait async
+  // CHECK: %[[LOOP:.*]] = scf.for {{.*}} iter_args(%[[ITER:.*]] = %[[INIT]]) -> (!gpu.async.token) {
+  // CHECK: %[[NEXT:.*]] = gpu.launch_func async [%[[ITER]]]
+  // CHECK-NOT: gpu.wait
+  // CHECK: scf.yield %[[NEXT]] : !gpu.async.token
+  // CHECK: gpu.wait [%[[LOOP]]]
+  func.func @for_op_threads_token(%lb : index, %ub : index, %step : index, %sz : index) {
+    scf.for %i = %lb to %ub step %step {
+      gpu.launch_func @kernels::@kernel
+          blocks in (%sz, %sz, %sz) threads in (%sz, %sz, %sz)
+    }
+    return
+  }
 }
