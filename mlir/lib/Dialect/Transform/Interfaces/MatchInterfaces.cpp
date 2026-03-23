@@ -104,6 +104,10 @@ LogicalResult transform::verifyTransformMatchDimsOp(Operation *op,
 DiagnosedSilenceableFailure transform::expandTargetSpecification(
     Location loc, bool isAll, bool isInverted, ArrayRef<int64_t> rawList,
     int64_t maxNumber, SmallVectorImpl<int64_t> &result) {
+
+  if (maxNumber == 0) {
+    return DiagnosedSilenceableFailure::success();
+  }
   assert(maxNumber > 0 && "expected size to be positive");
   assert(!(isAll && isInverted) && "cannot invert all");
   if (isAll) {
