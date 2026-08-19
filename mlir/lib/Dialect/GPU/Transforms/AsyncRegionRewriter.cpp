@@ -143,17 +143,11 @@ private:
       return success();
     }
 
-    // scf.if without else cannot thread a token result. Synchronize changed
-    // branch work and keep the incoming token for the fallthrough path.
-    if (!ifOp.elseBlock()) {
-      if (thenToken && thenToken != incomingToken)
-        synchronizeBranchToken(ifOp.thenBlock(), thenToken);
-      currentToken = incomingToken;
-      return success();
-    }
-
-    // If both branches end with tokens, thread them through scf.if.
+    // If both paths end with tokens, thread them through scf.if. Materialize
+    // an else region that yields the incoming token when the original op did
+    // not have one.
     if (thenToken && elseToken) {
+      const bool hadElse = ifOp.elseBlock();
       auto tokenType = builder.getType<gpu::AsyncTokenType>();
       SmallVector<Type, 2> resultTypes(ifOp.getResultTypes());
       resultTypes.push_back(tokenType);
@@ -164,12 +158,20 @@ private:
                                                /*withElseRegion=*/true);
       newIfOp->setAttrs(ifOp->getAttrs());
       newIfOp.getThenRegion().takeBody(ifOp.getThenRegion());
-      newIfOp.getElseRegion().takeBody(ifOp.getElseRegion());
+      if (hadElse) {
+        newIfOp.getElseRegion().takeBody(ifOp.getElseRegion());
+      } else {
+        builder.setInsertionPointToEnd(newIfOp.elseBlock());
+        builder.create<scf::YieldOp>(ifOp.getLoc(), elseToken);
+      }
 
       auto thenYield = cast<scf::YieldOp>(newIfOp.thenBlock()->getTerminator());
       thenYield->insertOperands(thenYield.getNumOperands(), thenToken);
-      auto elseYield = cast<scf::YieldOp>(newIfOp.elseBlock()->getTerminator());
-      elseYield->insertOperands(elseYield.getNumOperands(), elseToken);
+      if (hadElse) {
+        auto elseYield =
+            cast<scf::YieldOp>(newIfOp.elseBlock()->getTerminator());
+        elseYield->insertOperands(elseYield.getNumOperands(), elseToken);
+      }
 
       ifOp->replaceAllUsesWith(newIfOp.getResults().drop_back());
       currentToken = newIfOp.getResult(newIfOp.getNumResults() - 1);
