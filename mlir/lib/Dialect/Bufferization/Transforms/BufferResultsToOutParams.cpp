@@ -168,6 +168,16 @@ updateReturnOps(func::FuncOp func, ArrayRef<BlockArgument> appendedEntryArgs,
     }
     OpBuilder builder(op);
     SmallVector<SmallVector<Value>> dynamicSizes;
+    // A duplicated return operand refers to the same Value as an earlier
+    // operand. Erasing its defining op inside the loop would leave later
+    // iterations with a dangling Value, and re-hoisting the same Value would
+    // be a no-op (its uses were already replaced) and leave the repeated
+    // out-param unwritten. Hoist each Value at most once, defer erasure
+    // until after the loop, and copy a repeated operand from the out-param
+    // the first occurrence was hoisted to (the defining buffer is about to be
+    // erased, so it must not gain new uses).
+    SmallVector<Operation *, 2> erasedDefiningOps;
+    DenseMap<Value, Value> hoistedOrigins;
     for (auto [orig, arg] : llvm::zip(copyIntoOutParams, appendedEntryArgs)) {
       bool hoistStaticAllocs =
           options.hoistStaticAllocs &&
@@ -175,15 +185,24 @@ updateReturnOps(func::FuncOp func, ArrayRef<BlockArgument> appendedEntryArgs,
       bool hoistDynamicAllocs =
           options.hoistDynamicAllocs &&
           !cast<MemRefType>(orig.getType()).hasStaticShape();
+      auto hoisted = hoistedOrigins.find(orig);
       if ((hoistStaticAllocs || hoistDynamicAllocs) &&
+          hoisted == hoistedOrigins.end() &&
           isa_and_nonnull<bufferization::AllocationOpInterface>(
               orig.getDefiningOp())) {
+        hoistedOrigins[orig] = arg;
         orig.replaceAllUsesWith(arg);
         if (hoistDynamicAllocs) {
           SmallVector<Value> dynamicSize = getDynamicSize(orig, func);
           dynamicSizes.push_back(dynamicSize);
         }
-        orig.getDefiningOp()->erase();
+        Operation *definingOp = orig.getDefiningOp();
+        if (!llvm::is_contained(erasedDefiningOps, definingOp))
+          erasedDefiningOps.push_back(definingOp);
+      } else if (hoisted != hoistedOrigins.end()) {
+        // Repeated operand: copy from the out-param of the first occurrence.
+        if (failed(options.memCpyFn(builder, op.getLoc(), hoisted->second, arg)))
+          return WalkResult::interrupt();
       } else {
         if (failed(options.memCpyFn(builder, op.getLoc(), orig, arg)))
           return WalkResult::interrupt();
@@ -191,6 +210,8 @@ updateReturnOps(func::FuncOp func, ArrayRef<BlockArgument> appendedEntryArgs,
     }
     func::ReturnOp::create(builder, op.getLoc(), keepAsReturnOperands);
     op.erase();
+    for (Operation *definingOp : erasedDefiningOps)
+      definingOp->erase();
     auto dynamicSizePair =
         std::pair<func::FuncOp, SmallVector<SmallVector<Value>>>(func,
                                                                  dynamicSizes);
