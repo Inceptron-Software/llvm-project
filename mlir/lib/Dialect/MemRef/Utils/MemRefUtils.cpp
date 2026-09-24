@@ -168,13 +168,24 @@ static bool resultIsNotRead(Operation *op, std::vector<Operation *> &uses) {
 }
 
 void eraseDeadAllocAndStores(RewriterBase &rewriter, Operation *parentOp) {
+  // A use op can be reachable from several dead allocs (e.g. a pooled
+  // memref.dealloc takes multiple operands), so dedupe the work list
+  // while keeping the discovery order (users precede their definers in
+  // the collection order; erasing in that order keeps eraseOp's
+  // use-empty assertion satisfied). Pushing an op once per alloc
+  // double-erases (and double-frees) it.
   std::vector<Operation *> opToErase;
+  llvm::SmallDenseSet<Operation *, 16> seen;
   parentOp->walk([&](Operation *op) {
     std::vector<Operation *> candidates;
     if (isa<memref::AllocOp, memref::AllocaOp>(op) &&
         resultIsNotRead(op, candidates)) {
-      llvm::append_range(opToErase, candidates);
-      opToErase.push_back(op);
+      for (Operation *candidate: candidates) {
+        if (seen.insert(candidate).second)
+          opToErase.push_back(candidate);
+      }
+      if (seen.insert(op).second)
+        opToErase.push_back(op);
     }
   });
 
