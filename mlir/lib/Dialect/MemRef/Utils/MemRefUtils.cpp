@@ -154,9 +154,21 @@ static bool resultIsNotRead(Operation *op, std::vector<Operation *> &uses) {
     // Use escaped the scope
     if (useOp->mightHaveTrait<OpTrait::IsTerminator>())
       return false;
-    if (isa<memref::DeallocOp>(useOp) ||
-        (useOp->getNumResults() == 0 && useOp->getNumRegions() == 0 &&
-         !mlir::hasEffect<MemoryEffects::Read>(useOp)) ||
+    // Unknown effects (e.g. a function call) are not evidence of no reads.
+    // Even a write-only user cannot be erased if it also writes another buffer.
+    auto writesOnlyThisBuffer = [&] {
+      auto effectsOp = dyn_cast<MemoryEffectOpInterface>(useOp);
+      if (!effectsOp || useOp->getNumResults() != 0 ||
+          useOp->getNumRegions() != 0)
+        return false;
+      SmallVector<MemoryEffects::EffectInstance> effects;
+      effectsOp.getEffects(effects);
+      return llvm::all_of(effects, [&](const auto &effect) {
+        return isa<MemoryEffects::Write>(effect.getEffect()) &&
+               effect.getValue() == use.get();
+      });
+    };
+    if (isa<memref::DeallocOp>(useOp) || writesOnlyThisBuffer() ||
         (isa<ViewLikeOpInterface>(useOp) && resultIsNotRead(useOp, opUses))) {
       opUses.push_back(useOp);
       continue;

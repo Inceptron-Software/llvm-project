@@ -481,3 +481,34 @@ module attributes {transform.with_named_sequence} {
     transform.yield
   }
 }
+
+// -----
+
+// Calls without SSA results may read the allocation and write other buffers.
+func.func private @initialize_conditions(memref<?xi1>, memref<1xi1>)
+
+// CHECK-LABEL: func.func @keep_call_with_unknown_effects
+// CHECK: %[[BUFFER:.*]] = memref.alloc() : memref<1xi1>
+// CHECK: memref.store
+// CHECK: %[[VIEW:.*]] = memref.cast %[[BUFFER]]
+// CHECK: call @initialize_conditions(%[[VIEW]], %arg0)
+// CHECK: memref.dealloc %[[BUFFER]]
+// CHECK: return
+func.func @keep_call_with_unknown_effects(%out: memref<1xi1>) {
+  %c0 = arith.constant 0 : index
+  %true = arith.constant true
+  %buffer = memref.alloc() : memref<1xi1>
+  memref.store %true, %buffer[%c0] : memref<1xi1>
+  %view = memref.cast %buffer : memref<1xi1> to memref<?xi1>
+  call @initialize_conditions(%view, %out) : (memref<?xi1>, memref<1xi1>) -> ()
+  memref.dealloc %buffer : memref<1xi1>
+  return
+}
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%root: !transform.any_op {transform.readonly}) {
+    %funcs = transform.structured.match ops{["func.func"]} in %root : (!transform.any_op) -> !transform.any_op
+    transform.memref.erase_dead_alloc_and_stores %funcs : (!transform.any_op) -> ()
+    transform.yield
+  }
+}
