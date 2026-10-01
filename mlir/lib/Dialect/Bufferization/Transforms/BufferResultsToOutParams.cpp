@@ -166,6 +166,9 @@ updateReturnOps(func::FuncOp func, ArrayRef<BlockArgument> appendedEntryArgs,
       else
         keepAsReturnOperands.push_back(operand);
     }
+    DenseMap<Value, unsigned> returnOperandCounts;
+    for (Value operand : copyIntoOutParams)
+      ++returnOperandCounts[operand];
     OpBuilder builder(op);
     SmallVector<SmallVector<Value>> dynamicSizes;
     for (auto [orig, arg] : llvm::zip(copyIntoOutParams, appendedEntryArgs)) {
@@ -176,6 +179,7 @@ updateReturnOps(func::FuncOp func, ArrayRef<BlockArgument> appendedEntryArgs,
           options.hoistDynamicAllocs &&
           !cast<MemRefType>(orig.getType()).hasStaticShape();
       if ((hoistStaticAllocs || hoistDynamicAllocs) &&
+          returnOperandCounts.lookup(orig) == 1 &&
           isa_and_nonnull<bufferization::AllocationOpInterface>(
               orig.getDefiningOp())) {
         orig.replaceAllUsesWith(arg);

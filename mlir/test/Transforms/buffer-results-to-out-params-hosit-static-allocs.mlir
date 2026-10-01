@@ -36,6 +36,22 @@ func.func @basic_dynamic(%d: index) -> (memref<?xf32>) {
   return %b : memref<?xf32>
 }
 
+// An allocation returned more than once cannot be hoisted to either out
+// parameter because replacing all uses would invalidate the other return.
+// CHECK-LABEL:   func @duplicate_result(
+// CHECK-SAME:        %[[ARG0:.*]]: memref<8x64xf32>, %[[ARG1:.*]]: memref<8x64xf32>) {
+// CHECK:           %[[RESULT:.*]] = memref.alloc() : memref<8x64xf32>
+// CHECK:           "test.source"(%[[RESULT]])
+// CHECK:           memref.copy %[[RESULT]], %[[ARG0]]
+// CHECK:           memref.copy %[[RESULT]], %[[ARG1]]
+// CHECK:           return
+// CHECK:         }
+func.func @duplicate_result() -> (memref<8x64xf32>, memref<8x64xf32>) {
+  %b = memref.alloc() : memref<8x64xf32>
+  "test.source"(%b) : (memref<8x64xf32>) -> ()
+  return %b, %b : memref<8x64xf32>, memref<8x64xf32>
+}
+
 // -----
 
 // no change due to writing to func args
